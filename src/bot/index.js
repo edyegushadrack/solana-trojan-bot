@@ -4,13 +4,8 @@ import { getKeypair } from "../wallet/keypair.js";
 import { getSolBalance } from "../rpc/connection.js";
 import { getTokenBalance } from "../wallet/balances.js";
 import { SOL_MINT } from "../execution/jupiter.js";
-import { executeManualTrade } from "../execution/trade.js";
-import {
-  getSolBalanceLamports,
-  getTokenHolding,
-  getPortfolioSnapshot,
-  resetPortfolio,
-} from "../paper/portfolio.js";
+import { executeManualTrade, getPaperPortfolioReport } from "../execution/trade.js";
+import { getSolBalanceLamports, getTokenHolding, resetPortfolio } from "../paper/portfolio.js";
 import {
   startSnipeEngine,
   stopSnipeEngine,
@@ -143,17 +138,37 @@ bot.command("portfolio", async (ctx) => {
   if (!config.paperTrading) {
     return ctx.reply("Not in paper mode — use /balance for real wallet balance.");
   }
-  const snap = getPortfolioSnapshot();
-  const sol = Number(snap.solLamports) / 1e9;
-  const holdingLines = Object.entries(snap.holdings)
-    .filter(([, amt]) => amt !== "0")
-    .map(([mint, amt]) => `  ${mint}: ${amt} raw units`);
+
+  await ctx.reply("Pulling current prices for open positions...");
+  const report = await getPaperPortfolioReport();
+
+  const sol = Number(report.solLamports) / 1e9;
+  const realizedPnl = Number(report.realizedPnlLamports) / 1e9;
+
+  let unrealizedTotal = 0;
+  let unrealizedUnknown = false;
+  const lines = report.positions.map((p) => {
+    const costSol = Number(p.costBasisLamports) / 1e9;
+    if (p.unrealizedPnlLamports === null) {
+      unrealizedUnknown = true;
+      return `  ${p.mint}\n    amount: ${p.amount} raw, cost basis: ${costSol.toFixed(4)} SOL, current value: no route`;
+    }
+    const valueSol = Number(p.currentValueLamports) / 1e9;
+    const pnlSol = Number(p.unrealizedPnlLamports) / 1e9;
+    unrealizedTotal += pnlSol;
+    const sign = pnlSol >= 0 ? "+" : "";
+    return `  ${p.mint}\n    amount: ${p.amount} raw, cost: ${costSol.toFixed(4)} SOL, value: ${valueSol.toFixed(4)} SOL, PnL: ${sign}${pnlSol.toFixed(4)} SOL`;
+  });
 
   await ctx.reply(
     `${modeTag()} Portfolio\n` +
       `SOL: ${sol.toFixed(4)}\n` +
-      (holdingLines.length ? `Holdings:\n${holdingLines.join("\n")}\n` : "Holdings: none\n") +
-      `Trades recorded: ${snap.tradeCount}`
+      `Realized PnL: ${realizedPnl >= 0 ? "+" : ""}${realizedPnl.toFixed(4)} SOL\n` +
+      `Unrealized PnL: ${unrealizedTotal >= 0 ? "+" : ""}${unrealizedTotal.toFixed(4)} SOL` +
+      (unrealizedUnknown ? " (some positions have no current route)" : "") +
+      "\n" +
+      (lines.length ? `Positions:\n${lines.join("\n")}\n` : "Positions: none\n") +
+      `Trades recorded: ${report.tradeCount}`
   );
 });
 

@@ -1,6 +1,6 @@
 import { config } from "../config.js";
 import { getQuote, getSignedSwapTransaction, executeSwap, SOL_MINT } from "./jupiter.js";
-import { simulateFill } from "../paper/portfolio.js";
+import { simulateFill, getPortfolioSnapshot } from "../paper/portfolio.js";
 import { buildTipTransaction, getRandomTipAccount, sendBundle } from "../snipe/jito.js";
 import { getKeypair } from "../wallet/keypair.js";
 
@@ -68,4 +68,50 @@ export async function executeSnipeBuy({ mint, solLamports, slippageBps, tipLampo
   const bundleId = await sendBundle([swapTx, tipTx]);
 
   return { paper: false, bundleId, quote };
+}
+
+/**
+ * Full paper portfolio report including unrealized PnL — for each open
+ * position, gets a fresh Jupiter quote for "sell it all right now" and
+ * compares that to cost basis. This is a live estimate, not the price
+ * you'd actually get selling that exact amount (slippage on the real sell
+ * may differ slightly), but it's the same mechanism a real sell would use.
+ */
+export async function getPaperPortfolioReport() {
+  const snap = getPortfolioSnapshot();
+  const positions = [];
+
+  for (const [mint, pos] of Object.entries(snap.holdings)) {
+    if (pos.amount === "0") continue;
+
+    let currentValueLamports = null;
+    try {
+      const quote = await getQuote({
+        inputMint: mint,
+        outputMint: SOL_MINT,
+        amount: pos.amount,
+        slippageBps: 100,
+      });
+      if (quote && !quote.error) currentValueLamports = BigInt(quote.outAmount);
+    } catch {
+      // no route right now — likely too illiquid or too new; leave null
+    }
+
+    const costBasisLamports = BigInt(pos.costBasisLamports);
+    positions.push({
+      mint,
+      amount: pos.amount,
+      costBasisLamports: pos.costBasisLamports,
+      currentValueLamports: currentValueLamports?.toString() ?? null,
+      unrealizedPnlLamports:
+        currentValueLamports === null ? null : String(currentValueLamports - costBasisLamports),
+    });
+  }
+
+  return {
+    solLamports: snap.solLamports,
+    realizedPnlLamports: snap.realizedPnlLamports,
+    tradeCount: snap.tradeCount,
+    positions,
+  };
 }
