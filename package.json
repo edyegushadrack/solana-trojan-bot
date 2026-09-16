@@ -1,0 +1,18 @@
+{
+  "name": "solana-trojan-bot",
+  "version": "0.1.0",
+  "description": "Personal Solana trading bot: manual buy/sell, snipe, copy-trade via Telegram",
+  "type": "module",
+  "main": "src/bot/index.js",
+  "scripts": {
+    "start": "node src/bot/index.js"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.95.3",
+    "axios": "^1.7.7",
+    "bs58": "^5.0.0",
+    "dotenv": "^16.4.5",
+    "grammy": "^1.30.0",
+    "ws": "^8.18.0"
+  }
+}
