@@ -14,10 +14,10 @@ let enabled = false;
 async function handleCandidate(token, onEvent) {
   if (!passesBasicFilter(token)) return;
 
-  // NOTE: this is the point where Phase 4's rug/forensics checks belong —
-  // mint/freeze authority, bundler/sniper detection, deployer rug history.
-  // Right now this fires on anything that clears the basic liquidity bar.
-  // Do not raise buySol above throwaway-test amounts until that's wired in.
+  // Mint/freeze authority checks, spend/slippage/price-impact limits, and
+  // the kill switch all run inside executeSnipeBuy -> risk/gate.js before
+  // any spend happens. Deployer rug-history and bundler/sniper detection
+  // from the meme-scanner repo are NOT wired in yet — see README.
 
   onEvent?.({ type: "candidate", token });
 

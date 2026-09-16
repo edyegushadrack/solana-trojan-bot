@@ -3,47 +3,77 @@ import { getQuote, getSignedSwapTransaction, executeSwap, SOL_MINT } from "./jup
 import { simulateFill, getPortfolioSnapshot } from "../paper/portfolio.js";
 import { buildTipTransaction, getRandomTipAccount, sendBundle } from "../snipe/jito.js";
 import { getKeypair } from "../wallet/keypair.js";
+import { runRiskGate } from "../risk/gate.js";
+import { enforceSpendLimit, enforceSlippageLimit, enforcePriceImpact } from "../risk/limits.js";
 
 /**
- * Manual buy/sell path (/buy, /sell). Paper mode: quote + simulate, no
- * signing. Real mode: normal RPC send via executeSwap.
+ * Manual buy/sell path (/buy, /sell). One quote is fetched up front and
+ * reused for the risk checks AND the actual fill/send, so the checks see
+ * exactly the trade that's about to happen. Buys go through the full risk
+ * gate (limits + mint/freeze authority + kill switch); sells don't — see
+ * risk/killswitch.js for why sells are never blocked.
  */
 export async function executeManualTrade({ inputMint, outputMint, amount, slippageBps }) {
-  if (config.paperTrading) {
-    const quote = await getQuote({ inputMint, outputMint, amount, slippageBps });
-    if (!quote || quote.error) {
-      throw new Error(`No route: ${quote?.error ?? "unknown error"}`);
+  const isBuy = inputMint === SOL_MINT;
+  const mint = isBuy ? outputMint : inputMint;
+
+  if (isBuy) enforceSpendLimit(amount / 1e9);
+  enforceSlippageLimit(slippageBps);
+
+  const quote = await getQuote({ inputMint, outputMint, amount, slippageBps });
+  if (!quote || quote.error) {
+    throw new Error(`No route: ${quote?.error ?? "unknown error"}`);
+  }
+  enforcePriceImpact(quote);
+
+  if (isBuy) {
+    const gate = await runRiskGate(mint);
+    if (!gate.passed) {
+      throw new Error(`Risk gate blocked buy: ${gate.reasons.join("; ")}`);
     }
-    const { isBuy, tokenMint } = simulateFill({
+  }
+
+  if (config.paperTrading) {
+    const { isBuy: filledBuy, tokenMint } = simulateFill({
       inputMint,
       outputMint,
       inAmount: BigInt(quote.inAmount),
       outAmount: BigInt(quote.outAmount),
       solMint: SOL_MINT,
     });
-    return { paper: true, signature: null, quote, isBuy, tokenMint };
+    return { paper: true, signature: null, quote, isBuy: filledBuy, tokenMint };
   }
 
-  const { signature, quote } = await executeSwap({ inputMint, outputMint, amount, slippageBps });
-  return { paper: false, signature, quote, isBuy: inputMint === SOL_MINT, tokenMint: inputMint === SOL_MINT ? outputMint : inputMint };
+  const { signature } = await executeSwap({ inputMint, outputMint, amount, slippageBps, quote });
+  return { paper: false, signature, quote, isBuy, tokenMint: mint };
 }
 
 /**
- * Snipe-engine buy path. Paper mode: same simulation as manual trades, no
- * websocket-to-wallet latency to worry about since nothing is actually
- * signed. Real mode: signed swap tx + Jito tip bundled together, as before.
+ * Snipe-engine buy path — always a buy, so always goes through the full
+ * risk gate. Paper mode: simulate against the same quote. Real mode:
+ * signed swap tx + Jito tip bundled together, as before.
  */
 export async function executeSnipeBuy({ mint, solLamports, slippageBps, tipLamports }) {
+  enforceSpendLimit(solLamports / 1e9);
+  enforceSlippageLimit(slippageBps);
+
+  const quote = await getQuote({
+    inputMint: SOL_MINT,
+    outputMint: mint,
+    amount: solLamports,
+    slippageBps,
+  });
+  if (!quote || quote.error) {
+    throw new Error(`No route: ${quote?.error ?? "unknown error"}`);
+  }
+  enforcePriceImpact(quote);
+
+  const gate = await runRiskGate(mint);
+  if (!gate.passed) {
+    throw new Error(`Risk gate blocked snipe: ${gate.reasons.join("; ")}`);
+  }
+
   if (config.paperTrading) {
-    const quote = await getQuote({
-      inputMint: SOL_MINT,
-      outputMint: mint,
-      amount: solLamports,
-      slippageBps,
-    });
-    if (!quote || quote.error) {
-      throw new Error(`No route: ${quote?.error ?? "unknown error"}`);
-    }
     simulateFill({
       inputMint: SOL_MINT,
       outputMint: mint,
@@ -55,12 +85,13 @@ export async function executeSnipeBuy({ mint, solLamports, slippageBps, tipLampo
   }
 
   const keypair = getKeypair();
-  const { tx: swapTx, quote } = await getSignedSwapTransaction({
+  const { tx: swapTx } = await getSignedSwapTransaction({
     inputMint: SOL_MINT,
     outputMint: mint,
     amount: solLamports,
     slippageBps,
     skipPriorityFee: true,
+    quote,
   });
 
   const tipAccount = await getRandomTipAccount();

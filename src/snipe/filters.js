@@ -4,11 +4,11 @@ export const snipeConfig = {
 
 /**
  * Cheap, synchronous pre-check only — filters out launches too thin to be
- * worth reacting to at all. This is deliberately NOT the rug/forensics
- * layer (Phase 4): mint/freeze authority checks, bundler/sniper detection,
- * and deployer rug history live in the meme-scanner repo and MUST gate
- * every buy here before this touches real money. Wire that in before you
- * flip /snipe on with anything more than test amounts.
+ * worth reacting to at all, before spending an RPC/Jupiter call on them.
+ * The real risk checks (mint/freeze authority, spend/slippage/impact
+ * limits, kill switch) run afterward in risk/gate.js and risk/limits.js
+ * for anything that passes this. Deployer rug-history and bundler
+ * detection from the meme-scanner repo still aren't wired in — see README.
  */
 export function passesBasicFilter(token) {
   const liquiditySol = Number(token.vSolInBondingCurve ?? 0);

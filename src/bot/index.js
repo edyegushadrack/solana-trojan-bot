@@ -11,6 +11,8 @@ import {
   stopSnipeEngine,
   isSnipeEngineRunning,
 } from "../snipe/engine.js";
+import { activateKillSwitch, deactivateKillSwitch, getKillSwitchState } from "../risk/killswitch.js";
+import { riskConfig } from "../risk/limits.js";
 
 const bot = new Bot(config.telegramBotToken);
 
@@ -31,16 +33,51 @@ function modeTag() {
 
 bot.command("start", (ctx) =>
   ctx.reply(
-    `Solana trading bot ready. Mode: ${modeTag()}\n\n` +
+    `Solana trading bot ready. Mode: ${modeTag()}${getKillSwitchState().active ? " ⚠️ KILL SWITCH ACTIVE" : ""}\n\n` +
       "/balance — SOL balance (paper or real, depending on mode)\n" +
       "/buy <mint> <sol_amount> [slippage_bps]\n" +
       "/sell <mint> <percent> [slippage_bps]\n" +
       "/snipe on | off\n" +
       "/portfolio — paper trading positions + trade count\n" +
       "/resetpaper — wipe paper portfolio back to starting balance\n" +
-      "/paper on | off — toggle simulate-only mode"
+      "/paper on | off — toggle simulate-only mode\n" +
+      "/killswitch on | off | status — block/unblock new buys\n" +
+      "/risk — show current risk limits"
   )
 );
+
+bot.command("risk", (ctx) =>
+  ctx.reply(
+    `Risk limits (edit via .env, restart to change):\n` +
+      `  Max spend per trade: ${riskConfig.maxSpendSol} SOL\n` +
+      `  Max slippage: ${riskConfig.maxSlippageBps} bps\n` +
+      `  Max price impact: ${riskConfig.maxPriceImpactPct}%\n\n` +
+      `Kill switch: ${getKillSwitchState().active ? "ACTIVE (buys blocked)" : "off"}\n\n` +
+      `Buys also require: mint authority renounced, freeze authority renounced. ` +
+      `Deployer rug-history and bundler detection are not wired in yet — see README.`
+  )
+);
+
+bot.command("killswitch", (ctx) => {
+  const arg = ctx.match.trim().toLowerCase();
+
+  if (arg === "on") {
+    activateKillSwitch("manual");
+    return ctx.reply("🛑 Kill switch ACTIVE. All new buys (manual and sniped) are blocked. Sells still work.");
+  }
+
+  if (arg === "off") {
+    deactivateKillSwitch();
+    return ctx.reply("Kill switch cleared. Buys are allowed again.");
+  }
+
+  const state = getKillSwitchState();
+  return ctx.reply(
+    state.active
+      ? `Kill switch is ACTIVE (reason: ${state.reason}, since ${state.at}).\nUsage: /killswitch on | off`
+      : "Kill switch is off.\nUsage: /killswitch on | off"
+  );
+});
 
 bot.command("balance", async (ctx) => {
   const pubkey = getKeypair().publicKey;
@@ -222,8 +259,10 @@ bot.command("snipe", async (ctx) => {
       }
     });
     return ctx.reply(
-      `${modeTag()} Snipe engine started. NOTE: Phase 4 rug checks are not wired in yet ` +
-        "— this fires on anything clearing the basic liquidity filter."
+      `${modeTag()} Snipe engine started. Phase 4 checks active: mint/freeze ` +
+        "authority, max spend/slippage/price-impact, kill switch. " +
+        "Deployer rug-history + bundler detection are NOT wired in yet — " +
+        "these checks catch real risks but not all of them. See /risk."
     );
   }
 

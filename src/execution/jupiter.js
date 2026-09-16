@@ -55,10 +55,11 @@ export async function getSignedSwapTransaction({
   amount,
   slippageBps,
   skipPriorityFee = false,
+  quote: providedQuote,
 }) {
   const keypair = getKeypair();
 
-  const quote = await getQuote({ inputMint, outputMint, amount, slippageBps });
+  const quote = providedQuote ?? (await getQuote({ inputMint, outputMint, amount, slippageBps }));
   if (!quote || quote.error) {
     throw new Error(`No route: ${quote?.error ?? "unknown error"}`);
   }
@@ -81,14 +82,17 @@ export async function getSignedSwapTransaction({
  * Full swap flow over normal RPC: quote -> build -> sign -> send -> confirm.
  * Use this for manual /buy and /sell. For the snipe engine's Jito bundle
  * path, use getSignedSwapTransaction directly instead.
+ * Pass `quote` if you already fetched one (e.g. for a risk check) to skip
+ * re-fetching.
  * Returns { signature, quote }.
  */
-export async function executeSwap({ inputMint, outputMint, amount, slippageBps }) {
+export async function executeSwap({ inputMint, outputMint, amount, slippageBps, quote: providedQuote }) {
   const { tx, quote } = await getSignedSwapTransaction({
     inputMint,
     outputMint,
     amount,
     slippageBps,
+    quote: providedQuote,
   });
 
   const signature = await connection.sendTransaction(tx, {

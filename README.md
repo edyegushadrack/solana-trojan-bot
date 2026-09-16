@@ -35,9 +35,14 @@ src/
 - [ ] **Phase 3 — Copy-trade engine.** Websocket subscription to a target
       wallet's tx log, swap-instruction parsing, mirrored buy with your own
       sizing logic.
-- [ ] **Phase 4 — Risk/safety layer.** Mint/freeze authority checks, LP
-      lock/burn checks, max slippage, max spend per trade, kill switch. This
-      gates phases 2 and 3 — don't wire snipe/copy to real money without it.
+- [x] **Phase 4 — Risk/safety layer (partial).** Mint/freeze authority
+      checks (on-chain, real), max spend per trade, max slippage, max price
+      impact, and a kill switch that blocks new buys (never sells) all gate
+      every buy now — manual or sniped. NOT included: deployer rug-history
+      and bundler/sniper same-block detection. That logic already exists in
+      the meme-scanner repo, backed by its Supabase project, and porting it
+      in is the natural next step rather than rebuilding it here — see
+      "Known gap" below.
 - [ ] **Phase 5 — Persistence.** Postgres/SQLite (or reuse the Supabase
       project from the meme-scanner) for trade history, open positions,
       settings.
@@ -47,6 +52,18 @@ meme-scanner repo (mint/freeze authority, bundler/sniper detection,
 deployer rug history), phase 4 here should call into that rather than
 duplicate it — worth deciding now whether this bot and the scanner share a
 package or stay separate repos that both hit the same Supabase project.
+
+## Known gap: deployer history + bundler detection
+
+The risk gate (`src/risk/gate.js`) checks what's verifiable from the mint
+account alone: authorities and the kill switch. It does **not** check
+deployer rug history or same-block bundler/sniper patterns — that logic
+lives in the `meme-scanner` repo's `fetchOnChainSignals.js`, backed by its
+own Supabase project, and tracks patterns across many launches over time.
+Rebuilding that here from scratch would just drift from the original.
+Wiring it in needs either read access to that Supabase project or a pulled
+copy of the detection code — worth doing before trusting `/snipe on` with
+real position sizes, since the current checks catch real but partial risk.
 
 ## Setup
 
@@ -62,6 +79,8 @@ what you're willing to lose testing this — not your main bag.
 
 ## Commands
 
+- `/risk` — current risk limits and kill switch status
+- `/killswitch on | off | status` — block/unblock new buys (sells always work)
 - `/balance` — SOL balance (simulated or real, depending on mode)
 - `/buy <mint> <sol_amount> [slippage_bps]` — buy via Jupiter
 - `/sell <mint> <percent> [slippage_bps]` — sell a % of your holding of `mint`
