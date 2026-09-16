@@ -12,6 +12,8 @@ src/
   wallet/keypair.js    loads your hot wallet keypair from env
   rpc/connection.js    Solana connection (Helius/QuickNode/Triton)
   execution/jupiter.js quote + swap via Jupiter Swap API, sign & send
+  execution/trade.js   routes buys/sells to paper simulation or real execution
+  paper/portfolio.js   simulated SOL + token balances for paper trading
   bot/index.js         grammy Telegram bot — commands + session state
   risk/                (phase 4) rug checks, spend limits, kill switch
   snipe/                (phase 2) pool-creation listener + auto-buy
@@ -60,10 +62,32 @@ what you're willing to lose testing this — not your main bag.
 
 ## Commands
 
-- `/balance` — SOL balance of the hot wallet
-- `/buy <mint> <sol_amount> [slippage_bps]` — market buy via Jupiter
+- `/balance` — SOL balance (simulated or real, depending on mode)
+- `/buy <mint> <sol_amount> [slippage_bps]` — buy via Jupiter
 - `/sell <mint> <percent> [slippage_bps]` — sell a % of your holding of `mint`
 - `/snipe on` / `/snipe off` — start/stop the auto-snipe engine
+- `/portfolio` — paper trading balance, holdings, trade count
+- `/resetpaper` — reset the paper portfolio to `PAPER_STARTING_SOL`
+- `/paper on` / `/paper off` — toggle simulate-only mode (see below)
+
+## Paper trading
+
+The bot boots in paper mode by default: every `/buy`, `/sell`, and snipe
+fire a real Jupiter quote so pricing and slippage are realistic, but the
+fill is simulated against a local virtual portfolio (`data/paper-portfolio.json`)
+instead of signing and sending anything. Good for exercising the whole
+pipeline — snipe detection, filters, sizing, the bot commands — before real
+funds are at risk.
+
+**Turning it off is a two-key switch, on purpose:**
+1. Set `PAPER_TRADING=false` in `.env` and restart the bot. This unlocks
+   the switch but doesn't flip it.
+2. Send `/paper off` in Telegram to actually arm real trades.
+
+Without step 1, `/paper off` is refused outright — a stray command can't
+accidentally arm real money. The bot also always boots back into paper
+mode regardless of what `.env` says, so leaving live mode on between
+restarts isn't possible either.
 
 ## ⚠️ Before you turn /snipe on
 

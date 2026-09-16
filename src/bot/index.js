@@ -3,7 +3,14 @@ import { config } from "../config.js";
 import { getKeypair } from "../wallet/keypair.js";
 import { getSolBalance } from "../rpc/connection.js";
 import { getTokenBalance } from "../wallet/balances.js";
-import { executeSwap, SOL_MINT } from "../execution/jupiter.js";
+import { SOL_MINT } from "../execution/jupiter.js";
+import { executeManualTrade } from "../execution/trade.js";
+import {
+  getSolBalanceLamports,
+  getTokenHolding,
+  getPortfolioSnapshot,
+  resetPortfolio,
+} from "../paper/portfolio.js";
 import {
   startSnipeEngine,
   stopSnipeEngine,
@@ -23,19 +30,33 @@ bot.use(async (ctx, next) => {
   await next();
 });
 
+function modeTag() {
+  return config.paperTrading ? "[PAPER]" : "[LIVE]";
+}
+
 bot.command("start", (ctx) =>
   ctx.reply(
-    "Solana trading bot ready.\n\n" +
-      "/balance — wallet SOL balance\n" +
+    `Solana trading bot ready. Mode: ${modeTag()}\n\n` +
+      "/balance — SOL balance (paper or real, depending on mode)\n" +
       "/buy <mint> <sol_amount> [slippage_bps]\n" +
-      "/sell <mint> <percent> [slippage_bps]"
+      "/sell <mint> <percent> [slippage_bps]\n" +
+      "/snipe on | off\n" +
+      "/portfolio — paper trading positions + trade count\n" +
+      "/resetpaper — wipe paper portfolio back to starting balance\n" +
+      "/paper on | off — toggle simulate-only mode"
   )
 );
 
 bot.command("balance", async (ctx) => {
   const pubkey = getKeypair().publicKey;
+
+  if (config.paperTrading) {
+    const sol = Number(getSolBalanceLamports()) / 1e9;
+    return ctx.reply(`${modeTag()} ${pubkey.toBase58()}\n${sol.toFixed(4)} SOL (simulated)`);
+  }
+
   const sol = await getSolBalance(pubkey);
-  await ctx.reply(`${pubkey.toBase58()}\n${sol.toFixed(4)} SOL`);
+  await ctx.reply(`${modeTag()} ${pubkey.toBase58()}\n${sol.toFixed(4)} SOL`);
 });
 
 bot.command("buy", async (ctx) => {
@@ -54,15 +75,19 @@ bot.command("buy", async (ctx) => {
 
   const lamports = Math.round(solAmount * 1e9);
 
-  await ctx.reply(`Buying ${solAmount} SOL of ${mint} (slippage ${slippageBps} bps)...`);
+  await ctx.reply(`${modeTag()} Buying ${solAmount} SOL of ${mint} (slippage ${slippageBps} bps)...`);
   try {
-    const { signature } = await executeSwap({
+    const result = await executeManualTrade({
       inputMint: SOL_MINT,
       outputMint: mint,
       amount: lamports,
       slippageBps,
     });
-    await ctx.reply(`Filled: https://solscan.io/tx/${signature}`);
+    if (result.paper) {
+      await ctx.reply(`Simulated fill: received ${result.quote.outAmount} raw units of ${mint}`);
+    } else {
+      await ctx.reply(`Filled: https://solscan.io/tx/${result.signature}`);
+    }
   } catch (err) {
     await ctx.reply(`Buy failed: ${err.message}`);
   }
@@ -82,28 +107,85 @@ bot.command("sell", async (ctx) => {
     return ctx.reply("percent must be between 0 and 100");
   }
 
-  const pubkey = getKeypair().publicKey;
-  const { amount, decimals } = await getTokenBalance(pubkey, mint);
+  let amount;
+  if (config.paperTrading) {
+    amount = getTokenHolding(mint);
+  } else {
+    const pubkey = getKeypair().publicKey;
+    ({ amount } = await getTokenBalance(pubkey, mint));
+  }
+
   if (amount === 0n) {
-    return ctx.reply(`No balance of ${mint} in this wallet`);
+    return ctx.reply(`${modeTag()} No balance of ${mint} to sell`);
   }
 
   const sellAmount = (amount * BigInt(Math.round(percent * 100))) / 10000n;
 
-  await ctx.reply(`Selling ${percent}% of ${mint} (slippage ${slippageBps} bps)...`);
+  await ctx.reply(`${modeTag()} Selling ${percent}% of ${mint} (slippage ${slippageBps} bps)...`);
   try {
-    const { signature } = await executeSwap({
+    const result = await executeManualTrade({
       inputMint: mint,
       outputMint: SOL_MINT,
       amount: Number(sellAmount),
       slippageBps,
     });
-    await ctx.reply(`Filled: https://solscan.io/tx/${signature}`);
+    if (result.paper) {
+      await ctx.reply(`Simulated fill: received ${result.quote.outAmount} lamports SOL`);
+    } else {
+      await ctx.reply(`Filled: https://solscan.io/tx/${result.signature}`);
+    }
   } catch (err) {
     await ctx.reply(`Sell failed: ${err.message}`);
   }
-  // decimals reserved for display formatting once we add position tracking
-  void decimals;
+});
+
+bot.command("portfolio", async (ctx) => {
+  if (!config.paperTrading) {
+    return ctx.reply("Not in paper mode — use /balance for real wallet balance.");
+  }
+  const snap = getPortfolioSnapshot();
+  const sol = Number(snap.solLamports) / 1e9;
+  const holdingLines = Object.entries(snap.holdings)
+    .filter(([, amt]) => amt !== "0")
+    .map(([mint, amt]) => `  ${mint}: ${amt} raw units`);
+
+  await ctx.reply(
+    `${modeTag()} Portfolio\n` +
+      `SOL: ${sol.toFixed(4)}\n` +
+      (holdingLines.length ? `Holdings:\n${holdingLines.join("\n")}\n` : "Holdings: none\n") +
+      `Trades recorded: ${snap.tradeCount}`
+  );
+});
+
+bot.command("resetpaper", async (ctx) => {
+  if (!config.paperTrading) {
+    return ctx.reply("Not in paper mode — nothing to reset.");
+  }
+  resetPortfolio();
+  await ctx.reply(`Paper portfolio reset to ${config.paperStartingSol} SOL.`);
+});
+
+bot.command("paper", async (ctx) => {
+  const arg = ctx.match.trim().toLowerCase();
+
+  if (arg === "on") {
+    config.paperTrading = true;
+    return ctx.reply("Paper trading ON. Nothing will touch the real wallet.");
+  }
+
+  if (arg === "off") {
+    if (config.paperTradingLocked) {
+      return ctx.reply(
+        "Refused: PAPER_TRADING is not set to \"false\" in .env. " +
+          "Set PAPER_TRADING=false there and restart the bot before /paper off will work — " +
+          "this is deliberate, it's a two-step switch."
+      );
+    }
+    config.paperTrading = false;
+    return ctx.reply("⚠️ Paper trading OFF. Real trades will now sign and send with real funds.");
+  }
+
+  return ctx.reply(`Usage: /paper on | off (currently ${modeTag()})`);
 });
 
 bot.command("snipe", async (ctx) => {
@@ -115,15 +197,18 @@ bot.command("snipe", async (ctx) => {
       if (event.type === "candidate") {
         ctx.reply(`Candidate: ${event.token.mint} (${event.token.name ?? "?"})`);
       } else if (event.type === "bundle_sent") {
-        ctx.reply(`Bundle sent for ${event.token.mint}: ${event.bundleId}`);
+        const tag = event.paper ? "[PAPER] Simulated buy" : "Bundle sent";
+        const detail = event.paper
+          ? `received ${event.quote?.outAmount ?? "?"} raw units`
+          : event.bundleId;
+        ctx.reply(`${tag} for ${event.token.mint}: ${detail}`);
       } else if (event.type === "error") {
         ctx.reply(`Snipe error on ${event.token.mint}: ${event.error}`);
       }
     });
     return ctx.reply(
-      "Snipe engine started. NOTE: Phase 4 rug checks are not wired in yet " +
-        "— this fires on anything clearing the basic liquidity filter. " +
-        "Only run with throwaway buy amounts until that's done."
+      `${modeTag()} Snipe engine started. NOTE: Phase 4 rug checks are not wired in yet ` +
+        "— this fires on anything clearing the basic liquidity filter."
     );
   }
 
@@ -142,4 +227,4 @@ bot.catch((err) => {
 });
 
 bot.start();
-console.log("Bot running. Wallet:", getKeypair().publicKey.toBase58());
+console.log(`Bot running in ${config.paperTrading ? "PAPER" : "LIVE"} mode. Wallet:`, getKeypair().publicKey.toBase58());

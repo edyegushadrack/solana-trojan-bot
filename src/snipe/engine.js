@@ -1,8 +1,6 @@
-import { getKeypair } from "../wallet/keypair.js";
-import { getSignedSwapTransaction, SOL_MINT } from "../execution/jupiter.js";
 import { listenForNewTokens } from "./pumpportal.js";
 import { passesBasicFilter } from "./filters.js";
-import { buildTipTransaction, getRandomTipAccount, sendBundle } from "./jito.js";
+import { executeSnipeBuy } from "../execution/trade.js";
 
 const engineConfig = {
   buySol: Number(process.env.SNIPE_BUY_SOL ?? 0.05),
@@ -24,26 +22,16 @@ async function handleCandidate(token, onEvent) {
   onEvent?.({ type: "candidate", token });
 
   try {
-    const keypair = getKeypair();
     const lamports = Math.round(engineConfig.buySol * 1e9);
 
-    const { tx: swapTx } = await getSignedSwapTransaction({
-      inputMint: SOL_MINT,
-      outputMint: token.mint,
-      amount: lamports,
+    const { paper, bundleId, quote } = await executeSnipeBuy({
+      mint: token.mint,
+      solLamports: lamports,
       slippageBps: engineConfig.slippageBps,
-      skipPriorityFee: true, // Jito tip replaces this
+      tipLamports: engineConfig.tipLamports,
     });
 
-    const tipAccount = await getRandomTipAccount();
-    const tipTx = await buildTipTransaction(
-      keypair,
-      tipAccount,
-      engineConfig.tipLamports
-    );
-
-    const bundleId = await sendBundle([swapTx, tipTx]);
-    onEvent?.({ type: "bundle_sent", token, bundleId });
+    onEvent?.({ type: "bundle_sent", token, bundleId, paper, quote });
   } catch (err) {
     onEvent?.({ type: "error", token, error: err.message });
   }
