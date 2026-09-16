@@ -50,10 +50,12 @@ export async function executeManualTrade({ inputMint, outputMint, amount, slippa
 
 /**
  * Snipe-engine buy path — always a buy, so always goes through the full
- * risk gate. Paper mode: simulate against the same quote. Real mode:
- * signed swap tx + Jito tip bundled together, as before.
+ * risk gate. Pass deployerAddress (PumpPortal's traderPublicKey on the
+ * create event) to also run the deployer repeat-launch check.
+ * Paper mode: simulate against the same quote. Real mode: signed swap tx +
+ * Jito tip bundled together, as before.
  */
-export async function executeSnipeBuy({ mint, solLamports, slippageBps, tipLamports }) {
+export async function executeSnipeBuy({ mint, solLamports, slippageBps, tipLamports, deployerAddress }) {
   enforceSpendLimit(solLamports / 1e9);
   enforceSlippageLimit(slippageBps);
 
@@ -68,7 +70,7 @@ export async function executeSnipeBuy({ mint, solLamports, slippageBps, tipLampo
   }
   enforcePriceImpact(quote);
 
-  const gate = await runRiskGate(mint);
+  const gate = await runRiskGate(mint, { deployerAddress });
   if (!gate.passed) {
     throw new Error(`Risk gate blocked snipe: ${gate.reasons.join("; ")}`);
   }

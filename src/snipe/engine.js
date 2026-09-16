@@ -29,6 +29,7 @@ async function handleCandidate(token, onEvent) {
       solLamports: lamports,
       slippageBps: engineConfig.slippageBps,
       tipLamports: engineConfig.tipLamports,
+      deployerAddress: token.traderPublicKey,
     });
 
     onEvent?.({ type: "bundle_sent", token, bundleId, paper, quote });

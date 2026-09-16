@@ -24,4 +24,7 @@ export const config = {
   paperTradingLocked: !envAllowsRealTrades, // true = /paper off is refused
   paperTrading: true, // runtime flag — always starts true, see above
   paperStartingSol: Number(process.env.PAPER_STARTING_SOL ?? 10),
+  // Optional — deployer-history check (risk/deployerHistory.js) no-ops if unset
+  supabaseUrl: process.env.SUPABASE_URL,
+  supabaseAnonKey: process.env.SUPABASE_ANON_KEY,
 };

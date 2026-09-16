@@ -1,22 +1,25 @@
 import { getMintAuthorities } from "./authorities.js";
 import { isKillSwitchActive } from "./killswitch.js";
+import { checkDeployerHistory } from "./deployerHistory.js";
 
 /**
  * The single choke point every BUY (manual /buy or sniped) passes through
  * before spending. Sells never go through this — see killswitch.js for why.
  *
+ * Pass deployerAddress when known (the snipe engine has it from PumpPortal's
+ * traderPublicKey field on every "create" event) to also run the deployer
+ * repeat-launch check. Manual /buy on an arbitrary mint won't have this
+ * unless the deployer is looked up separately, so that check is skipped —
+ * gate still runs the on-chain authority check either way.
+ *
  * Returns { passed: boolean, reasons: string[] }.
  *
- * WHAT THIS DOES NOT COVER YET: deployer rug-history and bundler/sniper
- * same-block detection. That logic already exists in the meme-scanner
- * repo (fetchOnChainSignals.js there), backed by its Supabase project —
- * it tracks patterns across many launches over time, which is exactly the
- * kind of thing that shouldn't be rebuilt from scratch here. Wiring it in
- * needs either Supabase read credentials for that project or a pulled
- * copy of that detection code. Until then, this gate only catches what's
- * checkable from the mint account alone — real, but partial, coverage.
+ * WHAT THIS DOES NOT COVER: bundler/same-block-buy detection. The
+ * meme-scanner's `token_early_buyers` table (meant to hold this) has 0 rows
+ * in production — that detection isn't actually running there yet either,
+ * so there's nothing real to port for that piece. See README.
  */
-export async function runRiskGate(mint) {
+export async function runRiskGate(mint, { deployerAddress } = {}) {
   const reasons = [];
 
   if (isKillSwitchActive()) {
@@ -36,6 +39,11 @@ export async function runRiskGate(mint) {
     // A failed check is treated as a block, not a pass — "couldn't verify"
     // should never be silently treated the same as "verified safe."
     reasons.push(`Could not verify mint authorities: ${err.message}`);
+  }
+
+  if (deployerAddress) {
+    const history = await checkDeployerHistory(deployerAddress);
+    reasons.push(...history.reasons);
   }
 
   return { passed: reasons.length === 0, reasons };

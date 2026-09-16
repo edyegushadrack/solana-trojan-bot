@@ -53,17 +53,52 @@ deployer rug history), phase 4 here should call into that rather than
 duplicate it — worth deciding now whether this bot and the scanner share a
 package or stay separate repos that both hit the same Supabase project.
 
-## Known gap: deployer history + bundler detection
+## What the risk gate actually checks, and why
 
-The risk gate (`src/risk/gate.js`) checks what's verifiable from the mint
-account alone: authorities and the kill switch. It does **not** check
-deployer rug history or same-block bundler/sniper patterns — that logic
-lives in the `meme-scanner` repo's `fetchOnChainSignals.js`, backed by its
-own Supabase project, and tracks patterns across many launches over time.
-Rebuilding that here from scratch would just drift from the original.
-Wiring it in needs either read access to that Supabase project or a pulled
-copy of the detection code — worth doing before trusting `/snipe on` with
-real position sizes, since the current checks catch real but partial risk.
+`src/risk/gate.js` runs before every buy (manual or sniped):
+
+1. **Kill switch** — hard stop if active.
+2. **Mint/freeze authority** — read directly from the mint account.
+3. **Deployer history** (if `SUPABASE_URL` is set) — queries the
+   meme-scanner's `launches` table for how many prior pump.fun tokens this
+   wallet has created.
+
+**Why authority checks matter less than you'd think, for pump.fun specifically.**
+Querying the actual meme-scanner data (56,716 launches) before building
+this: `mint_authority_renounced`, `freeze_authority_renounced`, and
+`lp_locked_or_burned` are `true` on effectively 100% of them. Pump.fun's
+program enforces this at creation — the bonding curve controls minting,
+not the individual deployer — so these checks don't differentiate one
+pump.fun launch from another. They're still real and still run (they'd
+matter for a non-standard token or a future Raydium-graduated check), just
+don't expect them to catch much on pump.fun launches specifically.
+
+**Why deployer history uses prior-launch count, not average score.**
+`dev_holder_pct` is never populated in the dataset. `top10_holder_pct`
+averages ~99% at creation time (the bonding curve holds nearly all supply
+before anyone's bought). And — this one's worth knowing about the
+scanner's own scoring model — the highest-volume repeat deployers (900+
+launches from one wallet) score about the same on average (~65) as the
+rest of the dataset, because ~55 of a typical ~100 possible points come
+from the three now-universal authority/LP checks above. Score alone
+doesn't currently separate a mass-deployer farm from anything else.
+Prior-launch count does: median is 1 launch per wallet, 90th percentile is
+5, 99th is 46. A wallet with 15+ prior pump.fun launches (the default
+threshold, `RISK_MAX_DEPLOYER_PRIOR_LAUNCHES`) is a clear outlier — almost
+certainly a farm, not an individual project — so that's what's checked.
+
+**Read access, not the service-role key.** The `launches` table's RLS
+originally only allowed the scanner's own service-role key to read it. A
+narrow read-only policy (`anon read-only access`, SELECT-only on
+`launches`) was added so this bot can use the standard anon/publishable
+key instead — safe to have in a second app's env vars, since it can't
+write anything and can't read any other table.
+
+**What's still genuinely not covered:** same-block bundler/sniper
+detection. The meme-scanner's `token_early_buyers` table exists for this
+but has 0 rows in production — that detection isn't actually collecting
+data there yet, so there's nothing real to port. Worth building once the
+scanner side is actually populating it.
 
 ## Setup
 

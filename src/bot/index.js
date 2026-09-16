@@ -13,6 +13,7 @@ import {
 } from "../snipe/engine.js";
 import { activateKillSwitch, deactivateKillSwitch, getKillSwitchState } from "../risk/killswitch.js";
 import { riskConfig } from "../risk/limits.js";
+import { deployerHistoryConfig } from "../risk/deployerHistory.js";
 
 const bot = new Bot(config.telegramBotToken);
 
@@ -53,8 +54,10 @@ bot.command("risk", (ctx) =>
       `  Max slippage: ${riskConfig.maxSlippageBps} bps\n` +
       `  Max price impact: ${riskConfig.maxPriceImpactPct}%\n\n` +
       `Kill switch: ${getKillSwitchState().active ? "ACTIVE (buys blocked)" : "off"}\n\n` +
-      `Buys also require: mint authority renounced, freeze authority renounced. ` +
-      `Deployer rug-history and bundler detection are not wired in yet — see README.`
+      `Buys also require: mint authority renounced, freeze authority renounced.\n` +
+      `Deployer history: ${config.supabaseUrl ? `ON (flags >${deployerHistoryConfig.maxPriorLaunches} prior pump.fun launches from the same wallet)` : "OFF (SUPABASE_URL not set)"}\n\n` +
+      `Bundler/same-block detection is not available — the meme-scanner's ` +
+      `table for it is empty in production, there's nothing real to check yet.`
   )
 );
 
