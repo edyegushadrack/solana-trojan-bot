@@ -14,16 +14,25 @@ export const SOL_MINT = "So11111111111111111111111111111111111111112";
  * (lamports for SOL). slippageBps: 100 = 1%.
  */
 export async function getQuote({ inputMint, outputMint, amount, slippageBps }) {
-  const { data } = await axios.get(`${JUPITER_BASE}/swap/v1/quote`, {
-    params: {
-      inputMint,
-      outputMint,
-      amount,
-      slippageBps,
-      restrictIntermediateTokens: true,
-    },
-  });
-  return data;
+  try {
+    const { data } = await axios.get(`${JUPITER_BASE}/swap/v1/quote`, {
+      params: {
+        inputMint,
+        outputMint,
+        amount,
+        slippageBps,
+        restrictIntermediateTokens: true,
+      },
+    });
+    return data;
+  } catch (err) {
+    // Jupiter puts the actual reason in the response body on 4xx/5xx, but
+    // axios's default error just says "Request failed with status code
+    // 400" and throws away that body. Surface the real message instead —
+    // "status code 400" alone isn't actionable.
+    const detail = err.response?.data?.error ?? err.response?.data ?? err.message;
+    throw new Error(`Jupiter quote failed (${err.response?.status ?? "network"}): ${JSON.stringify(detail)}`);
+  }
 }
 
 /**
@@ -33,14 +42,19 @@ export async function getQuote({ inputMint, outputMint, amount, slippageBps }) {
  * fee would just be money paid twice for the same thing.
  */
 async function buildSwapTransaction(quoteResponse, userPublicKey, { skipPriorityFee = false } = {}) {
-  const { data } = await axios.post(`${JUPITER_BASE}/swap/v1/swap`, {
-    quoteResponse,
-    userPublicKey,
-    wrapAndUnwrapSol: true,
-    dynamicComputeUnitLimit: true,
-    ...(skipPriorityFee ? {} : { prioritizationFeeLamports: "auto" }),
-  });
-  return data.swapTransaction; // base64-encoded VersionedTransaction
+  try {
+    const { data } = await axios.post(`${JUPITER_BASE}/swap/v1/swap`, {
+      quoteResponse,
+      userPublicKey,
+      wrapAndUnwrapSol: true,
+      dynamicComputeUnitLimit: true,
+      ...(skipPriorityFee ? {} : { prioritizationFeeLamports: "auto" }),
+    });
+    return data.swapTransaction; // base64-encoded VersionedTransaction
+  } catch (err) {
+    const detail = err.response?.data?.error ?? err.response?.data ?? err.message;
+    throw new Error(`Jupiter swap-build failed (${err.response?.status ?? "network"}): ${JSON.stringify(detail)}`);
+  }
 }
 
 /**
