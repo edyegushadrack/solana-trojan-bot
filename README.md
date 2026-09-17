@@ -238,3 +238,28 @@ place. Confirmed via research, not assumed — see the comment in
 `filters.js`. It's left in place (harmless, protects against malformed
 events) but don't expect raising `SNIPE_MIN_LIQUIDITY_SOL` to meaningfully
 cut volume; `SNIPE_MAX_CONCURRENT` is the actual volume control right now.
+
+
+## Follow-up: the concurrency cap alone wasn't enough
+
+`SNIPE_MAX_CONCURRENT` shipped, got deployed (confirmed via Railway's
+deploy log), and the 429 storm continued anyway. Root cause: concurrency is
+a proxy for request rate, not a direct bound on it. Two concurrent
+candidate chains, each firing several RPC calls in quick succession, can
+still sustain well above 10 req/s if pump.fun's actual creation rate keeps
+both slots continuously refilled — which it does.
+
+**The actual fix:** `@solana/web3.js`'s `Connection` accepts a
+`fetchMiddleware` option — a single choke point called before *every* RPC
+request the connection makes, from any code path (ours, or the pump-sdk's,
+since `OnlinePumpSdk` was built with this same connection instance).
+`rpc/connection.js` now paces every request through it, spacing calls to a
+hard ceiling (`RPC_MAX_REQUESTS_PER_SECOND`, default 8) regardless of how
+many things want to call the RPC at once. Verified directly: fired 30
+simultaneous fake requests through the exact pacing logic, confirmed they
+came out spaced ~125ms apart (8/sec) rather than all at once.
+
+This is a direct bound on the actual bottleneck, not a proxy for it —
+`SNIPE_MAX_CONCURRENT` still helps (no point burning rate budget on stale
+candidates), but the rate limiter is what actually prevents 429s now,
+independent of how many concurrent chains are running.
