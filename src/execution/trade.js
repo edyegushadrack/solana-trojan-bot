@@ -2,9 +2,17 @@ import { config } from "../config.js";
 import { getQuote, getSignedSwapTransaction, executeSwap, SOL_MINT } from "./jupiter.js";
 import { simulateFill, getPortfolioSnapshot } from "../paper/portfolio.js";
 import { buildTipTransaction, getRandomTipAccount, sendBundle } from "../snipe/jito.js";
+import { getPumpFunBuyPlan } from "../snipe/pumpfunCurve.js";
 import { getKeypair } from "../wallet/keypair.js";
 import { runRiskGate } from "../risk/gate.js";
 import { enforceSpendLimit, enforceSlippageLimit, enforcePriceImpact } from "../risk/limits.js";
+import { connection } from "../rpc/connection.js";
+import {
+  ComputeBudgetProgram,
+  PublicKey,
+  TransactionMessage,
+  VersionedTransaction,
+} from "@solana/web3.js";
 
 /**
  * Manual buy/sell path (/buy, /sell). One quote is fetched up front and
@@ -52,13 +60,76 @@ export async function executeManualTrade({ inputMint, outputMint, amount, slippa
  * Snipe-engine buy path — always a buy, so always goes through the full
  * risk gate. Pass deployerAddress (PumpPortal's traderPublicKey on the
  * create event) to also run the deployer repeat-launch check.
- * Paper mode: simulate against the same quote. Real mode: signed swap tx +
- * Jito tip bundled together, as before.
+ *
+ * Tries the pump.fun bonding-curve program directly FIRST (see
+ * snipe/pumpfunCurve.js for why: Jupiter doesn't index fresh launches).
+ * Only falls back to Jupiter if the curve has already completed
+ * (graduated) — at that point it's the same as any other established
+ * token and Jupiter is the right tool again.
  */
 export async function executeSnipeBuy({ mint, solLamports, slippageBps, tipLamports, deployerAddress }) {
   enforceSpendLimit(solLamports / 1e9);
   enforceSlippageLimit(slippageBps);
 
+  const gate = await runRiskGate(mint, { deployerAddress });
+  if (!gate.passed) {
+    throw new Error(`Risk gate blocked snipe: ${gate.reasons.join("; ")}`);
+  }
+
+  const keypair = getKeypair();
+  const mintPubkey = new PublicKey(mint);
+
+  const plan = await getPumpFunBuyPlan({
+    mint: mintPubkey,
+    user: keypair.publicKey,
+    solLamports,
+    slippageBps,
+  });
+
+  if (!plan.graduated) {
+    // --- Curve-native path: pre-graduation, buy directly against pump.fun ---
+    // A synthetic quote-shaped object (matching Jupiter's inAmount/outAmount
+    // fields) so callers displaying event.quote don't need a separate code
+    // path for curve-native fills — the numbers are still real, just from
+    // bonding-curve math instead of a Jupiter quote.
+    const syntheticQuote = {
+      inAmount: String(solLamports),
+      outAmount: plan.expectedTokenAmount.toString(),
+    };
+
+    if (config.paperTrading) {
+      simulateFill({
+        inputMint: SOL_MINT,
+        outputMint: mint,
+        inAmount: BigInt(solLamports),
+        outAmount: BigInt(plan.expectedTokenAmount.toString()),
+        solMint: SOL_MINT,
+      });
+      return { paper: true, bundleId: null, quote: syntheticQuote, curveNative: true };
+    }
+
+    const { blockhash } = await connection.getLatestBlockhash();
+    const message = new TransactionMessage({
+      payerKey: keypair.publicKey,
+      recentBlockhash: blockhash,
+      instructions: [
+        // Curve buys + first-time ATA creation need more than the 200k
+        // default compute limit; 300k covers it with headroom.
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 300_000 }),
+        ...plan.instructions,
+      ],
+    }).compileToV0Message();
+    const swapTx = new VersionedTransaction(message);
+    swapTx.sign([keypair]);
+
+    const tipAccount = await getRandomTipAccount();
+    const tipTx = await buildTipTransaction(keypair, tipAccount, tipLamports);
+    const bundleId = await sendBundle([swapTx, tipTx]);
+
+    return { paper: false, bundleId, quote: syntheticQuote, curveNative: true };
+  }
+
+  // --- Fallback: curve already graduated, this is now an ordinary Jupiter-routable token ---
   const quote = await getQuote({
     inputMint: SOL_MINT,
     outputMint: mint,
@@ -70,11 +141,6 @@ export async function executeSnipeBuy({ mint, solLamports, slippageBps, tipLampo
   }
   enforcePriceImpact(quote);
 
-  const gate = await runRiskGate(mint, { deployerAddress });
-  if (!gate.passed) {
-    throw new Error(`Risk gate blocked snipe: ${gate.reasons.join("; ")}`);
-  }
-
   if (config.paperTrading) {
     simulateFill({
       inputMint: SOL_MINT,
@@ -83,10 +149,9 @@ export async function executeSnipeBuy({ mint, solLamports, slippageBps, tipLampo
       outAmount: BigInt(quote.outAmount),
       solMint: SOL_MINT,
     });
-    return { paper: true, bundleId: null, quote };
+    return { paper: true, bundleId: null, quote, curveNative: false };
   }
 
-  const keypair = getKeypair();
   const { tx: swapTx } = await getSignedSwapTransaction({
     inputMint: SOL_MINT,
     outputMint: mint,
@@ -100,7 +165,7 @@ export async function executeSnipeBuy({ mint, solLamports, slippageBps, tipLampo
   const tipTx = await buildTipTransaction(keypair, tipAccount, tipLamports);
   const bundleId = await sendBundle([swapTx, tipTx]);
 
-  return { paper: false, bundleId, quote };
+  return { paper: false, bundleId, quote, curveNative: false };
 }
 
 /**

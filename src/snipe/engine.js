@@ -14,17 +14,18 @@ let enabled = false;
 async function handleCandidate(token, onEvent) {
   if (!passesBasicFilter(token)) return;
 
-  // Mint/freeze authority checks, spend/slippage/price-impact limits, and
-  // the kill switch all run inside executeSnipeBuy -> risk/gate.js before
-  // any spend happens. Deployer rug-history and bundler/sniper detection
-  // from the meme-scanner repo are NOT wired in yet — see README.
+  // Mint/freeze authority checks, spend/slippage/price-impact limits, the
+  // kill switch, and the deployer repeat-launch check (if Supabase is
+  // configured) all run inside executeSnipeBuy -> risk/gate.js before any
+  // spend happens. Same-block bundler/sniper detection is still not
+  // available — see README for why.
 
   onEvent?.({ type: "candidate", token });
 
   try {
     const lamports = Math.round(engineConfig.buySol * 1e9);
 
-    const { paper, bundleId, quote } = await executeSnipeBuy({
+    const { paper, bundleId, quote, curveNative } = await executeSnipeBuy({
       mint: token.mint,
       solLamports: lamports,
       slippageBps: engineConfig.slippageBps,
@@ -32,7 +33,7 @@ async function handleCandidate(token, onEvent) {
       deployerAddress: token.traderPublicKey,
     });
 
-    onEvent?.({ type: "bundle_sent", token, bundleId, paper, quote });
+    onEvent?.({ type: "bundle_sent", token, bundleId, paper, quote, curveNative });
   } catch (err) {
     onEvent?.({ type: "error", token, error: err.message });
   }

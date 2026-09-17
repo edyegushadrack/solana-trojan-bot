@@ -12,6 +12,7 @@ src/
   wallet/keypair.js    loads your hot wallet keypair from env
   rpc/connection.js    Solana connection (Helius/QuickNode/Triton)
   execution/jupiter.js quote + swap via Jupiter Swap API, sign & send
+  snipe/pumpfunCurve.js direct pump.fun bonding-curve buy (pre-graduation)
   execution/trade.js   routes buys/sells to paper simulation or real execution
   paper/portfolio.js   simulated SOL + token balances for paper trading
   bot/index.js         grammy Telegram bot — commands + session state
@@ -151,3 +152,55 @@ into this bot yet** — that's Phase 4. Right now `/snipe on` fires on any
 pump.fun launch that clears a basic liquidity threshold
 (`SNIPE_MIN_LIQUIDITY_SOL`), nothing more. Keep `SNIPE_BUY_SOL` at a
 throwaway amount until Phase 4 is in.
+
+
+## Why snipes don't go through Jupiter (mostly)
+
+Early testing showed every single snipe failing with "Jupiter quote failed
+(400): The token ... is not tradable" — 100% of attempts, not intermittent.
+Root cause, confirmed against production logs and cross-checked with
+Jupiter's own issue tracker and multiple independent pump.fun sniper
+projects: **Jupiter's aggregator only routes through pools it has indexed,
+and a pump.fun bonding curve isn't indexed at the instant of creation** —
+which is exactly the moment a snipe is reacting to. This isn't a bug in
+this bot; it's a structural mismatch between "buy via a general aggregator"
+and "buy at creation."
+
+The fix (`src/snipe/pumpfunCurve.js`): buy directly against pump.fun's own
+bonding-curve program using the official `@pump-fun/pump-sdk`, bypassing
+Jupiter entirely for pre-graduation tokens. If a curve has already
+completed (`bondingCurve.complete`), the snipe path falls back to Jupiter
+automatically, since a graduated token is an ordinary Raydium/PumpSwap pool
+by then and Jupiter routes it fine. Manual `/buy` and `/sell` still use
+Jupiter only — they're for tokens you've deliberately chosen, not
+zero-second-old launches, so the same failure mode is far less likely
+there (though not impossible on a very fresh manual buy).
+
+**A real bug this caught before it shipped:** the SDK splits RPC-reading
+(`OnlinePumpSdk`) from pure offline instruction-building (`PumpSdk`, no
+connection at all) — early docs examples floating around online predate
+this split and show both fetch and build methods on one class. Calling the
+fetch methods on the wrong class would have silently returned `undefined`
+rather than erroring clearly. Caught by testing the actual installed
+package's method list directly rather than trusting documentation
+snippets — worth remembering if this SDK gets upgraded later.
+
+**Also caught by testing, not assumed:** `@pump-fun/pump-sdk` pulls in
+`@pump-fun/agent-payments-sdk`, which imports `BN` from `@coral-xyz/anchor`
+in a way Node's ESM loader can't resolve — a plain `import` of the package
+throws `Named export 'BN' not found` before any of this bot's own code
+even runs. Worked around with `createRequire` in `pumpfunCurve.js`, which
+routes resolution through Node's CommonJS loader instead. Confirmed by
+testing both the crash and the fix directly against the real installed
+package.
+
+**What's still unverified:** the actual on-chain read calls
+(`fetchGlobal`/`fetchFeeConfig`/`fetchBuyState`) and the bonding-curve math
+haven't been exercised against live data from this environment — this
+sandbox's network doesn't reach Solana RPC endpoints. Module resolution,
+class shapes, and method signatures are all confirmed against the real
+installed package; the live RPC path itself needs confirming once
+deployed. Paper mode is the way to check: it calls the exact same
+read/compute path as a real buy, just without signing or sending, so a
+clean `[PAPER] Simulated buy (curve)` message on a real fresh mint is
+strong evidence the whole thing works end to end.

@@ -252,7 +252,8 @@ bot.command("snipe", async (ctx) => {
       if (event.type === "candidate") {
         ctx.reply(`Candidate: ${event.token.mint} (${event.token.name ?? "?"})`);
       } else if (event.type === "bundle_sent") {
-        const tag = event.paper ? "[PAPER] Simulated buy" : "Bundle sent";
+        const route = event.curveNative ? "curve" : "Jupiter";
+        const tag = event.paper ? `[PAPER] Simulated buy (${route})` : `Bundle sent (${route})`;
         const detail = event.paper
           ? `received ${event.quote?.outAmount ?? "?"} raw units`
           : event.bundleId;
