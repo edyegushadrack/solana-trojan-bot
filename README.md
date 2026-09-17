@@ -204,3 +204,37 @@ deployed. Paper mode is the way to check: it calls the exact same
 read/compute path as a real buy, just without signing or sending, so a
 clean `[PAPER] Simulated buy (curve)` message on a real fresh mint is
 strong evidence the whole thing works end to end.
+
+
+## The 429 storm, and what was actually causing it
+
+Switching to Helius didn't fix the "429 Too Many Requests" errors — because
+Helius's free tier (10 req/s) wasn't actually the problem. The real cause:
+`snipe/engine.js` fired off a new, fully-concurrent chain of RPC calls
+(mint authority check + bonding-curve state fetch, ~4-6 calls) for *every*
+incoming PumpPortal message with no limit on how many could run at once.
+When several launches arrive within the same second — completely normal on
+pump.fun — that's several concurrent chains all hitting the RPC provider
+simultaneously, blowing past any free-tier ceiling regardless of provider.
+
+Two fixes:
+1. **`SNIPE_MAX_CONCURRENT`** (default 2) caps how many candidates are
+   processed at once. A candidate arriving while at capacity is dropped,
+   not queued — by the time a queued candidate's turn came up, the snipe
+   window would already be gone, so queueing would just spend RPC budget on
+   stale opportunities.
+2. **Global/FeeConfig caching** in `pumpfunCurve.js` — these are
+   program-wide settings that barely change, and were being re-fetched on
+   every candidate for no reason. Cached for 60s, cutting real RPC volume
+   per candidate roughly in half.
+
+**A related finding while debugging this:** the basic liquidity pre-filter
+(`filters.js`) checks `vSolInBondingCurve` against a threshold, but every
+pump.fun token starts with the *same* virtual reserves (~30 SOL) — that's a
+protocol constant, not a signal of real interest. On a "create" event
+specifically, this filter passes almost everything, which is part of why so
+much volume was reaching the expensive per-candidate path in the first
+place. Confirmed via research, not assumed — see the comment in
+`filters.js`. It's left in place (harmless, protects against malformed
+events) but don't expect raising `SNIPE_MIN_LIQUIDITY_SOL` to meaningfully
+cut volume; `SNIPE_MAX_CONCURRENT` is the actual volume control right now.

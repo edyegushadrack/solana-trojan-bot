@@ -39,6 +39,31 @@ const { PumpSdk, OnlinePumpSdk, getBuyTokenAmountFromSolAmount } = require("@pum
 const onlineSdk = new OnlinePumpSdk(connection);
 const offlineSdk = new PumpSdk();
 
+// Global and FeeConfig are program-wide settings, not per-token — they
+// almost never change and were being re-fetched on every single candidate,
+// doubling the RPC calls each snipe attempt needed for no benefit. Cached
+// with a short TTL so a real change (rare) still picks up within a minute,
+// but the common case costs zero extra RPC calls.
+const CACHE_TTL_MS = 60_000;
+let globalCache = null;
+let feeConfigCache = null;
+let cachedAt = 0;
+
+async function getCachedGlobalAndFeeConfig() {
+  const age = Date.now() - cachedAt;
+  if (globalCache && feeConfigCache && age < CACHE_TTL_MS) {
+    return { global: globalCache, feeConfig: feeConfigCache };
+  }
+  const [global, feeConfig] = await Promise.all([
+    onlineSdk.fetchGlobal(),
+    onlineSdk.fetchFeeConfig(),
+  ]);
+  globalCache = global;
+  feeConfigCache = feeConfig;
+  cachedAt = Date.now();
+  return { global, feeConfig };
+}
+
 /**
  * Builds the instructions for a bonding-curve buy, or reports that the
  * curve has already completed (graduated) — in which case the caller
@@ -52,9 +77,8 @@ const offlineSdk = new PumpSdk();
  * simulation without needing a Jupiter quote at all.
  */
 export async function getPumpFunBuyPlan({ mint, user, solLamports, slippageBps }) {
-  const [global, feeConfig, buyState] = await Promise.all([
-    onlineSdk.fetchGlobal(),
-    onlineSdk.fetchFeeConfig(),
+  const [{ global, feeConfig }, buyState] = await Promise.all([
+    getCachedGlobalAndFeeConfig(),
     onlineSdk.fetchBuyState(mint, user, TOKEN_PROGRAM_ID),
   ]);
 
