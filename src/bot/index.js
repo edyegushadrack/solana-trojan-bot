@@ -17,6 +17,35 @@ import { deployerHistoryConfig } from "../risk/deployerHistory.js";
 
 const bot = new Bot(config.telegramBotToken);
 
+// --- crash safety net --------------------------------------------------
+// A rejected promise anywhere with no .catch() is an unhandled rejection,
+// and modern Node kills the whole process for those by default. That's
+// what was actually happening: fire-and-forget ctx.reply() calls from the
+// snipe engine's event callback, with no .catch(), rejecting once Telegram
+// rate-limited the chat. This is the last line of defense — queueReply
+// below is the actual fix (paces sends so we don't hit that rate limit in
+// the first place), but this stays regardless, since some other
+// unanticipated rejection could otherwise crash the whole bot the same way.
+process.on("unhandledRejection", (err) => {
+  console.error("Unhandled rejection (process kept alive):", err);
+});
+
+// --- paced, crash-proof Telegram sends ----------------------------------
+// Telegram rate-limits messages to a single chat to roughly 1/sec
+// sustained. At real pump.fun volume, sending a message per event blows
+// through that fast. This queues sends and paces them, and swallows any
+// send failure instead of letting it become an unhandled rejection —
+// dropping a notification is fine; crashing the whole bot over one isn't.
+const MIN_SEND_INTERVAL_MS = 1100;
+let sendQueue = Promise.resolve();
+
+function queueReply(ctx, text) {
+  sendQueue = sendQueue
+    .then(() => new Promise((resolve) => setTimeout(resolve, MIN_SEND_INTERVAL_MS)))
+    .then(() => ctx.reply(text))
+    .catch((err) => console.error("Telegram send failed (dropped):", err.message));
+}
+
 // --- owner-only gate -------------------------------------------------
 // Single-user v1: refuse every command that isn't from your own Telegram
 // account. Comes before command handlers below.
@@ -249,24 +278,33 @@ bot.command("snipe", async (ctx) => {
   if (arg === "on") {
     if (isSnipeEngineRunning()) return ctx.reply("Already running.");
     startSnipeEngine((event) => {
-      if (event.type === "candidate") {
-        ctx.reply(`Candidate: ${event.token.mint} (${event.token.name ?? "?"})`);
-      } else if (event.type === "bundle_sent") {
+      // "candidate" events are deliberately not sent to Telegram — we
+      // confirmed almost every pump.fun launch passes the basic filter, so
+      // this fired a message for nearly every single one. At real volume
+      // that's several messages/sec to one chat, which Telegram's Bot API
+      // rate-limits — and every send here is fire-and-forget, so a
+      // rejected send became an unhandled promise rejection that crashed
+      // the whole process. queueReply (below) fixes the crash risk
+      // structurally; dropping this specific event fixes the actual noise
+      // that was triggering it in the first place.
+      if (event.type === "bundle_sent") {
         const route = event.curveNative ? "curve" : "Jupiter";
         const tag = event.paper ? `[PAPER] Simulated buy (${route})` : `Bundle sent (${route})`;
         const detail = event.paper
           ? `received ${event.quote?.outAmount ?? "?"} raw units`
           : event.bundleId;
-        ctx.reply(`${tag} for ${event.token.mint}: ${detail}`);
+        queueReply(ctx, `${tag} for ${event.token.mint}: ${detail}`);
       } else if (event.type === "error") {
-        ctx.reply(`Snipe error on ${event.token.mint}: ${event.error}`);
+        queueReply(ctx, `Snipe error on ${event.token.mint}: ${event.error}`);
       }
     });
     return ctx.reply(
       `${modeTag()} Snipe engine started. Phase 4 checks active: mint/freeze ` +
-        "authority, max spend/slippage/price-impact, kill switch. " +
-        "Deployer rug-history + bundler detection are NOT wired in yet — " +
-        "these checks catch real risks but not all of them. See /risk."
+        "authority, deployer repeat-launch history, max spend/slippage/price-impact, " +
+        "kill switch. Same-block bundler/sniper detection is still not available " +
+        "(the scanner's data for it is empty in production). Candidate-level " +
+        "messages are suppressed — pump.fun volume is too high for one message " +
+        "per launch. See /risk."
     );
   }
 
