@@ -14,6 +14,7 @@ import {
 import { activateKillSwitch, deactivateKillSwitch, getKillSwitchState } from "../risk/killswitch.js";
 import { riskConfig } from "../risk/limits.js";
 import { deployerHistoryConfig } from "../risk/deployerHistory.js";
+import { startExitEngine, stopExitEngine, isExitEngineRunning, exitConfig } from "../exit/engine.js";
 
 const bot = new Bot(config.telegramBotToken);
 
@@ -68,6 +69,7 @@ bot.command("start", (ctx) =>
       "/buy <mint> <sol_amount> [slippage_bps]\n" +
       "/sell <mint> <percent> [slippage_bps]\n" +
       "/snipe on | off\n" +
+      "/exits on | off — auto take-profit/stop-loss/max-hold on open positions\n" +
       "/portfolio — paper trading positions + trade count\n" +
       "/resetpaper — wipe paper portfolio back to starting balance\n" +
       "/paper on | off — toggle simulate-only mode\n" +
@@ -315,6 +317,51 @@ bot.command("snipe", async (ctx) => {
 
   return ctx.reply(
     `Usage: /snipe on | off (currently ${isSnipeEngineRunning() ? "on" : "off"})`
+  );
+});
+
+bot.command("exits", (ctx) => {
+  const arg = ctx.match.trim().toLowerCase();
+
+  if (arg === "on") {
+    if (isExitEngineRunning()) return ctx.reply("Already running.");
+    if (!config.paperTrading) {
+      return ctx.reply(
+        "Refused: exit management only handles paper positions right now — " +
+          "real-mode position enumeration hasn't been built or tested. " +
+          "See snipe/exit/engine.js for why. Nothing will happen in live mode."
+      );
+    }
+    startExitEngine((event) => {
+      if (event.type === "exit") {
+        const sign = event.pnlPct >= 0 ? "+" : "";
+        const detail = event.result.paper
+          ? `received ${event.result.quote?.outAmount ?? "?"} lamports SOL`
+          : event.result.signature;
+        queueReply(
+          ctx,
+          `[EXIT: ${event.reason}] ${event.mint} (${sign}${event.pnlPct.toFixed(1)}%): ${detail}`
+        );
+      } else if (event.type === "exit_error") {
+        queueReply(ctx, `Exit failed on ${event.mint} (${event.reason}): ${event.error}`);
+      } else if (event.type === "scan_error") {
+        queueReply(ctx, `Exit scan error: ${event.error}`);
+      }
+    });
+    return ctx.reply(
+      `Exit engine started. Take-profit +${exitConfig.takeProfitPct}%, ` +
+        `stop-loss -${exitConfig.stopLossPct}%, max hold ${exitConfig.maxHoldSeconds}s, ` +
+        `checking every ${exitConfig.checkIntervalSeconds}s. Paper positions only — see /start.`
+    );
+  }
+
+  if (arg === "off") {
+    stopExitEngine();
+    return ctx.reply("Exit engine stopped.");
+  }
+
+  return ctx.reply(
+    `Usage: /exits on | off (currently ${isExitEngineRunning() ? "on" : "off"})`
   );
 });
 

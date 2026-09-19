@@ -26,7 +26,9 @@ function load() {
     // migrate old shape (holdings[mint] was a plain amount string) if present
     for (const [mint, value] of Object.entries(parsed.holdings ?? {})) {
       if (typeof value === "string") {
-        parsed.holdings[mint] = { amount: value, costBasisLamports: "0" };
+        parsed.holdings[mint] = { amount: value, costBasisLamports: "0", openedAt: Date.now() };
+      } else if (value.openedAt === undefined) {
+        value.openedAt = Date.now(); // migrate positions from before this field existed
       }
     }
     parsed.realizedPnlLamports ??= "0";
@@ -45,7 +47,7 @@ function persist() {
 }
 
 function getPosition(mint) {
-  return state.holdings[mint] ?? { amount: "0", costBasisLamports: "0" };
+  return state.holdings[mint] ?? { amount: "0", costBasisLamports: "0", openedAt: null };
 }
 
 export function getSolBalanceLamports() {
@@ -78,9 +80,15 @@ export function simulateFill({ inputMint, outputMint, inAmount, outAmount, solMi
       throw new Error(`Simulated balance too low: have ${sol}, need ${inAmount} lamports`);
     }
     state.solLamports = String(sol - inAmount);
+    const wasEmpty = pos.amount === "0";
     state.holdings[tokenMint] = {
       amount: String(BigInt(pos.amount) + outAmount),
       costBasisLamports: String(BigInt(pos.costBasisLamports) + inAmount),
+      // Set once, on the buy that opens (or reopens, after a full close) a
+      // position. Averaging into an existing position never resets it —
+      // this is meant to answer "how long have I been in this," not
+      // "when was my most recent add."
+      openedAt: wasEmpty ? Date.now() : pos.openedAt,
     };
   } else {
     const held = BigInt(pos.amount);
@@ -95,6 +103,7 @@ export function simulateFill({ inputMint, outputMint, inAmount, outAmount, solMi
     state.holdings[tokenMint] = {
       amount: String(held - inAmount),
       costBasisLamports: String(costBasis - costBasisSold),
+      openedAt: pos.openedAt, // unchanged by a sell — only a fresh buy resets it
     };
     state.solLamports = String(getSolBalanceLamports() + outAmount);
     state.realizedPnlLamports = String(getRealizedPnlLamports() + realizedThisTrade);

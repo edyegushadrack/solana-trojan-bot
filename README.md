@@ -33,6 +33,18 @@ src/
       bundle submission (signed swap tx + tip tx, sent atomically) via
       `/snipe on|off`. Raydium pool-init detection isn't wired in yet — this
       only catches pump.fun launches for now.
+- [x] **Exit management (built ahead of Phase 3, since it's more
+      important).** `exit/engine.js` scans open paper positions on an
+      interval and sells on the first of three triggers: take-profit
+      (`EXIT_TAKE_PROFIT_PCT`, default +60%), stop-loss
+      (`EXIT_STOP_LOSS_PCT`, default -35%), or max hold time
+      (`EXIT_MAX_HOLD_SECONDS`, default 300s — a backstop, not a claim
+      that's the right number; tune it once you have real data). `/exits
+      on|off`. Sells reuse the exact same execution path as manual `/sell`.
+      **Paper positions only right now** — real-mode would need enumerating
+      actual wallet token accounts instead of reading the paper portfolio,
+      and that path has had zero live testing. `/exits on` refuses outright
+      in live mode rather than silently doing nothing.
 - [ ] **Phase 3 — Copy-trade engine.** Websocket subscription to a target
       wallet's tx log, swap-instruction parsing, mirrored buy with your own
       sizing logic.
@@ -121,6 +133,7 @@ what you're willing to lose testing this — not your main bag.
 - `/buy <mint> <sol_amount> [slippage_bps]` — buy via Jupiter
 - `/sell <mint> <percent> [slippage_bps]` — sell a % of your holding of `mint`
 - `/snipe on` / `/snipe off` — start/stop the auto-snipe engine
+- `/exits on` / `/exits off` — start/stop auto take-profit/stop-loss/max-hold (paper only)
 - `/portfolio` — paper trading balance, holdings, trade count
 - `/resetpaper` — reset the paper portfolio to `PAPER_STARTING_SOL`
 - `/paper on` / `/paper off` — toggle simulate-only mode (see below)
