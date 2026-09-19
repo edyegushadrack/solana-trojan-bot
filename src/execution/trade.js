@@ -2,7 +2,7 @@ import { config } from "../config.js";
 import { getQuote, getSignedSwapTransaction, executeSwap, SOL_MINT } from "./jupiter.js";
 import { simulateFill, getPortfolioSnapshot } from "../paper/portfolio.js";
 import { buildTipTransaction, getRandomTipAccount, sendBundle } from "../snipe/jito.js";
-import { getPumpFunBuyPlan } from "../snipe/pumpfunCurve.js";
+import { getPumpFunBuyPlan, getPumpFunSellValue } from "../snipe/pumpfunCurve.js";
 import { getKeypair } from "../wallet/keypair.js";
 import { runRiskGate } from "../risk/gate.js";
 import { enforceSpendLimit, enforceSlippageLimit, enforcePriceImpact } from "../risk/limits.js";
@@ -178,21 +178,53 @@ export async function executeSnipeBuy({ mint, solLamports, slippageBps, tipLampo
 export async function getPaperPortfolioReport() {
   const snap = getPortfolioSnapshot();
   const positions = [];
+  const userPubkey = getKeypair().publicKey;
 
   for (const [mint, pos] of Object.entries(snap.holdings)) {
     if (pos.amount === "0") continue;
 
     let currentValueLamports = null;
+
+    // Try the bonding curve directly first — this is what actually holds
+    // for everything bought via the curve-native snipe path, and Jupiter
+    // will reliably return "no route" for all of them until graduation
+    // (same reason it can't route buys). Only fall back to Jupiter if the
+    // curve reports graduated, or if the curve lookup itself fails for
+    // some other reason (e.g. dust amount too small to matter).
     try {
-      const quote = await getQuote({
-        inputMint: mint,
-        outputMint: SOL_MINT,
-        amount: pos.amount,
-        slippageBps: 100,
+      const mintPubkey = new PublicKey(mint);
+      const curveValue = await getPumpFunSellValue({
+        mint: mintPubkey,
+        user: userPubkey,
+        tokenAmount: BigInt(pos.amount),
       });
-      if (quote && !quote.error) currentValueLamports = BigInt(quote.outAmount);
+
+      if (curveValue.graduated) {
+        // Graduated — it's an ordinary Raydium/PumpSwap token now, Jupiter routes it fine.
+        const quote = await getQuote({
+          inputMint: mint,
+          outputMint: SOL_MINT,
+          amount: pos.amount,
+          slippageBps: 100,
+        });
+        if (quote && !quote.error) currentValueLamports = BigInt(quote.outAmount);
+      } else {
+        currentValueLamports = BigInt(curveValue.solLamports.toString());
+      }
     } catch {
-      // no route right now — likely too illiquid or too new; leave null
+      // Curve lookup failed outright (not just "graduated") — try Jupiter
+      // as a last resort in case this position somehow is routable there.
+      try {
+        const quote = await getQuote({
+          inputMint: mint,
+          outputMint: SOL_MINT,
+          amount: pos.amount,
+          slippageBps: 100,
+        });
+        if (quote && !quote.error) currentValueLamports = BigInt(quote.outAmount);
+      } catch {
+        // genuinely no route either way — leave null, shown as "no route"
+      }
     }
 
     const costBasisLamports = BigInt(pos.costBasisLamports);

@@ -263,3 +263,20 @@ This is a direct bound on the actual bottleneck, not a proxy for it —
 `SNIPE_MAX_CONCURRENT` still helps (no point burning rate budget on stale
 candidates), but the rate limiter is what actually prevents 429s now,
 independent of how many concurrent chains are running.
+
+
+## Follow-up: /portfolio had the same Jupiter-quoting gap as buying did
+
+Ran a real paper session and `/portfolio` showed "no route" on 3 of 7 open
+positions — exactly the same problem as the original snipe failures, just
+in a different code path I hadn't fixed yet. Valuing an open position for
+unrealized PnL was still going through Jupiter's quote, which can't price
+a pre-graduation pump.fun token for the same reason it can't route a buy
+for one.
+
+Fixed with the sell-side equivalent of the buy fix:
+`getPumpFunSellValue` (`pumpfunCurve.js`) uses the SDK's
+`getSellSolAmountFromTokenAmount` against the live curve — same mechanism
+the on-chain program itself uses — falling back to Jupiter only once a
+position's curve reports `complete` (graduated). `/portfolio` should now
+price every open position correctly regardless of graduation status.

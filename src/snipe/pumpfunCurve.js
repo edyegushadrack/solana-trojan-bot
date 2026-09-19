@@ -11,7 +11,7 @@ import { connection } from "../rpc/connection.js";
 // instead routes resolution through Node's CommonJS loader, which handles
 // it fine — verified directly, not assumed.
 const require = createRequire(import.meta.url);
-const { PumpSdk, OnlinePumpSdk, getBuyTokenAmountFromSolAmount } = require("@pump-fun/pump-sdk");
+const { PumpSdk, OnlinePumpSdk, getBuyTokenAmountFromSolAmount, getSellSolAmountFromTokenAmount } = require("@pump-fun/pump-sdk");
 
 /**
  * WHY THIS FILE EXISTS: Jupiter's aggregator only routes through pools it
@@ -111,4 +111,36 @@ export async function getPumpFunBuyPlan({ mint, user, solLamports, slippageBps }
   });
 
   return { graduated: false, instructions, expectedTokenAmount };
+}
+
+/**
+ * Values a held position against the live bonding curve — "what would
+ * selling this whole amount right now actually get", using the same math
+ * the on-chain program uses. This is what /portfolio needs for unrealized
+ * PnL on pre-graduation positions: Jupiter can't quote these (same reason
+ * it can't route buys — see the top of this file), so pricing them via
+ * Jupiter always returned "no route" for exactly the tokens this bot
+ * actually holds. Returns { graduated: true } if the curve has completed
+ * (caller should price it via Jupiter instead, since it's routable there
+ * by then), or { graduated: false, solLamports } otherwise.
+ */
+export async function getPumpFunSellValue({ mint, user, tokenAmount }) {
+  const [{ global, feeConfig }, sellState] = await Promise.all([
+    getCachedGlobalAndFeeConfig(),
+    onlineSdk.fetchSellState(mint, user, TOKEN_PROGRAM_ID),
+  ]);
+
+  if (sellState.bondingCurve.complete) {
+    return { graduated: true };
+  }
+
+  const solLamports = getSellSolAmountFromTokenAmount({
+    global,
+    feeConfig,
+    mintSupply: sellState.bondingCurve.tokenTotalSupply,
+    bondingCurve: sellState.bondingCurve,
+    amount: new BN(tokenAmount.toString()),
+  });
+
+  return { graduated: false, solLamports };
 }
