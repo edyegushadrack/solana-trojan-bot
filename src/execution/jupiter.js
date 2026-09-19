@@ -23,6 +23,8 @@ export async function getQuote({ inputMint, outputMint, amount, slippageBps }) {
         slippageBps,
         restrictIntermediateTokens: true,
       },
+      timeout: 8000, // a hung network call with no timeout blocks everything
+                     // awaiting it forever — this bit us in /portfolio
     });
     return data;
   } catch (err) {
@@ -49,7 +51,7 @@ async function buildSwapTransaction(quoteResponse, userPublicKey, { skipPriority
       wrapAndUnwrapSol: true,
       dynamicComputeUnitLimit: true,
       ...(skipPriorityFee ? {} : { prioritizationFeeLamports: "auto" }),
-    });
+    }, { timeout: 8000 });
     return data.swapTransaction; // base64-encoded VersionedTransaction
   } catch (err) {
     const detail = err.response?.data?.error ?? err.response?.data ?? err.message;

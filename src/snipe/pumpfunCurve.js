@@ -39,6 +39,21 @@ const { PumpSdk, OnlinePumpSdk, getBuyTokenAmountFromSolAmount, getSellSolAmount
 const onlineSdk = new OnlinePumpSdk(connection);
 const offlineSdk = new PumpSdk();
 
+// A stalled network call with no timeout blocks whatever awaits it
+// indefinitely — confirmed this happening: /portfolio looped over
+// positions sequentially, and one hung RPC/Jupiter call froze the whole
+// command with no way out short of restarting. Every fetch-based call in
+// this file goes through this wrapper now.
+const RPC_CALL_TIMEOUT_MS = 10_000;
+function withTimeout(promise, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} timed out after ${RPC_CALL_TIMEOUT_MS}ms`)), RPC_CALL_TIMEOUT_MS)
+    ),
+  ]);
+}
+
 // Global and FeeConfig are program-wide settings, not per-token — they
 // almost never change and were being re-fetched on every single candidate,
 // doubling the RPC calls each snipe attempt needed for no benefit. Cached
@@ -55,8 +70,8 @@ async function getCachedGlobalAndFeeConfig() {
     return { global: globalCache, feeConfig: feeConfigCache };
   }
   const [global, feeConfig] = await Promise.all([
-    onlineSdk.fetchGlobal(),
-    onlineSdk.fetchFeeConfig(),
+    withTimeout(onlineSdk.fetchGlobal(), "fetchGlobal"),
+    withTimeout(onlineSdk.fetchFeeConfig(), "fetchFeeConfig"),
   ]);
   globalCache = global;
   feeConfigCache = feeConfig;
@@ -79,7 +94,7 @@ async function getCachedGlobalAndFeeConfig() {
 export async function getPumpFunBuyPlan({ mint, user, solLamports, slippageBps }) {
   const [{ global, feeConfig }, buyState] = await Promise.all([
     getCachedGlobalAndFeeConfig(),
-    onlineSdk.fetchBuyState(mint, user, TOKEN_PROGRAM_ID),
+    withTimeout(onlineSdk.fetchBuyState(mint, user, TOKEN_PROGRAM_ID), "fetchBuyState"),
   ]);
 
   if (buyState.bondingCurve.complete) {
@@ -127,7 +142,7 @@ export async function getPumpFunBuyPlan({ mint, user, solLamports, slippageBps }
 export async function getPumpFunSellValue({ mint, user, tokenAmount }) {
   const [{ global, feeConfig }, sellState] = await Promise.all([
     getCachedGlobalAndFeeConfig(),
-    onlineSdk.fetchSellState(mint, user, TOKEN_PROGRAM_ID),
+    withTimeout(onlineSdk.fetchSellState(mint, user, TOKEN_PROGRAM_ID), "fetchSellState"),
   ]);
 
   if (sellState.bondingCurve.complete) {

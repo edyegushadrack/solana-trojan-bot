@@ -169,74 +169,84 @@ export async function executeSnipeBuy({ mint, solLamports, slippageBps, tipLampo
 }
 
 /**
- * Full paper portfolio report including unrealized PnL — for each open
- * position, gets a fresh Jupiter quote for "sell it all right now" and
- * compares that to cost basis. This is a live estimate, not the price
- * you'd actually get selling that exact amount (slippage on the real sell
- * may differ slightly), but it's the same mechanism a real sell would use.
+ * Values one held position: current sale value + unrealized PnL vs cost
+ * basis. Pulled out of getPaperPortfolioReport so positions can be valued
+ * in parallel rather than one at a time — the RPC rate limiter is already
+ * the real throughput ceiling (see rpc/connection.js), so serializing on
+ * top of it in this loop was just adding wait time for nothing. Each
+ * network call inside here has its own timeout (jupiter.js, pumpfunCurve.js)
+ * so one stuck lookup can't block the others or hang the whole report.
+ */
+async function valuePosition(mint, pos, userPubkey) {
+  let currentValueLamports = null;
+
+  // Try the bonding curve directly first — this is what actually holds
+  // for everything bought via the curve-native snipe path, and Jupiter
+  // will reliably return "no route" for all of them until graduation
+  // (same reason it can't route buys). Only fall back to Jupiter if the
+  // curve reports graduated, or if the curve lookup itself fails for
+  // some other reason (e.g. dust amount too small to matter).
+  try {
+    const mintPubkey = new PublicKey(mint);
+    const curveValue = await getPumpFunSellValue({
+      mint: mintPubkey,
+      user: userPubkey,
+      tokenAmount: BigInt(pos.amount),
+    });
+
+    if (curveValue.graduated) {
+      // Graduated — it's an ordinary Raydium/PumpSwap token now, Jupiter routes it fine.
+      const quote = await getQuote({
+        inputMint: mint,
+        outputMint: SOL_MINT,
+        amount: pos.amount,
+        slippageBps: 100,
+      });
+      if (quote && !quote.error) currentValueLamports = BigInt(quote.outAmount);
+    } else {
+      currentValueLamports = BigInt(curveValue.solLamports.toString());
+    }
+  } catch {
+    // Curve lookup failed outright (not just "graduated") — try Jupiter
+    // as a last resort in case this position somehow is routable there.
+    try {
+      const quote = await getQuote({
+        inputMint: mint,
+        outputMint: SOL_MINT,
+        amount: pos.amount,
+        slippageBps: 100,
+      });
+      if (quote && !quote.error) currentValueLamports = BigInt(quote.outAmount);
+    } catch {
+      // genuinely no route either way — leave null, shown as "no route"
+    }
+  }
+
+  const costBasisLamports = BigInt(pos.costBasisLamports);
+  return {
+    mint,
+    amount: pos.amount,
+    costBasisLamports: pos.costBasisLamports,
+    currentValueLamports: currentValueLamports?.toString() ?? null,
+    unrealizedPnlLamports:
+      currentValueLamports === null ? null : String(currentValueLamports - costBasisLamports),
+  };
+}
+
+/**
+ * Full paper portfolio report including unrealized PnL. Values every open
+ * position in parallel (see valuePosition above for why) and returns once
+ * they've all settled — a position whose lookup fails or times out shows
+ * as "no route" rather than blocking the rest of the report.
  */
 export async function getPaperPortfolioReport() {
   const snap = getPortfolioSnapshot();
-  const positions = [];
   const userPubkey = getKeypair().publicKey;
 
-  for (const [mint, pos] of Object.entries(snap.holdings)) {
-    if (pos.amount === "0") continue;
-
-    let currentValueLamports = null;
-
-    // Try the bonding curve directly first — this is what actually holds
-    // for everything bought via the curve-native snipe path, and Jupiter
-    // will reliably return "no route" for all of them until graduation
-    // (same reason it can't route buys). Only fall back to Jupiter if the
-    // curve reports graduated, or if the curve lookup itself fails for
-    // some other reason (e.g. dust amount too small to matter).
-    try {
-      const mintPubkey = new PublicKey(mint);
-      const curveValue = await getPumpFunSellValue({
-        mint: mintPubkey,
-        user: userPubkey,
-        tokenAmount: BigInt(pos.amount),
-      });
-
-      if (curveValue.graduated) {
-        // Graduated — it's an ordinary Raydium/PumpSwap token now, Jupiter routes it fine.
-        const quote = await getQuote({
-          inputMint: mint,
-          outputMint: SOL_MINT,
-          amount: pos.amount,
-          slippageBps: 100,
-        });
-        if (quote && !quote.error) currentValueLamports = BigInt(quote.outAmount);
-      } else {
-        currentValueLamports = BigInt(curveValue.solLamports.toString());
-      }
-    } catch {
-      // Curve lookup failed outright (not just "graduated") — try Jupiter
-      // as a last resort in case this position somehow is routable there.
-      try {
-        const quote = await getQuote({
-          inputMint: mint,
-          outputMint: SOL_MINT,
-          amount: pos.amount,
-          slippageBps: 100,
-        });
-        if (quote && !quote.error) currentValueLamports = BigInt(quote.outAmount);
-      } catch {
-        // genuinely no route either way — leave null, shown as "no route"
-      }
-    }
-
-    const costBasisLamports = BigInt(pos.costBasisLamports);
-    positions.push({
-      mint,
-      amount: pos.amount,
-      costBasisLamports: pos.costBasisLamports,
-      currentValueLamports: currentValueLamports?.toString() ?? null,
-      unrealizedPnlLamports:
-        currentValueLamports === null ? null : String(currentValueLamports - costBasisLamports),
-    });
-  }
+  const openHoldings = Object.entries(snap.holdings).filter(([, pos]) => pos.amount !== "0");
+  const positions = await Promise.all(
+    openHoldings.map(([mint, pos]) => valuePosition(mint, pos, userPubkey))
+  );
 
   return {
     solLamports: snap.solLamports,
