@@ -177,7 +177,7 @@ export async function executeSnipeBuy({ mint, solLamports, slippageBps, tipLampo
  * network call inside here has its own timeout (jupiter.js, pumpfunCurve.js)
  * so one stuck lookup can't block the others or hang the whole report.
  */
-async function valuePosition(mint, pos, userPubkey) {
+export async function valuePosition(mint, pos, userPubkey) {
   let currentValueLamports = null;
 
   // Try the bonding curve directly first — this is what actually holds

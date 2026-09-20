@@ -293,3 +293,36 @@ Fixed with the sell-side equivalent of the buy fix:
 the on-chain program itself uses — falling back to Jupiter only once a
 position's curve reports `complete` (graduated). `/portfolio` should now
 price every open position correctly regardless of graduation status.
+
+
+## Follow-up: /portfolio showing 100% "no route" — self-inflicted, not an RPC failure
+
+After running snipe + exits together for a while, /portfolio came back with
+all 23 open positions showing "no route." That's not the occasional
+propagation-lag case from earlier — 100% failure meant something systemic.
+
+Root cause, confirmed with the actual math before changing anything: the
+exit engine was valuing every open position, every scan (every 15s), and
+that cost grows with portfolio size — sniping keeps adding positions, so
+every scan gets more expensive over time, with no ceiling. All of that
+competes with active sniping for the same rate-limited RPC connection (the
+429 fix from earlier). Modeled it directly: at ~6+ req/s sustained snipe
+traffic (very plausible — 35 trades had already happened), the last calls
+in a 23-position batch don't even get dispatched until 10+ seconds in,
+which is longer than the 10s timeout those calls were racing against. Calls
+were being marked "failed" for sitting in a queue, not because the RPC was
+actually down.
+
+**The real fix:** bound the exit engine's own RPC footprint to a small,
+fixed number per scan (`EXIT_MAX_POSITIONS_PER_SCAN`, default 6),
+regardless of how many positions exist. Positions are checked in rotation
+— a large portfolio takes more scan cycles to fully cycle through, but no
+single scan's cost is unbounded. Verified directly: 23 positions, 6 per
+scan, full coverage confirmed within 4 scans with correct wraparound.
+Timeout also raised 10s -> 20s as secondary headroom, since a call
+legitimately queued for a while under real load is fine — it just
+shouldn't be mistaken for a dead RPC.
+
+`/portfolio` (the manual command) still values everything at once when you
+ask for it — it's a one-off request, not a recurring background cost, so
+there's no reason to limit it the same way.

@@ -44,7 +44,15 @@ const offlineSdk = new PumpSdk();
 // positions sequentially, and one hung RPC/Jupiter call froze the whole
 // command with no way out short of restarting. Every fetch-based call in
 // this file goes through this wrapper now.
-const RPC_CALL_TIMEOUT_MS = 10_000;
+// 20s, not 10s — a call can legitimately sit in the RPC rate limiter's
+// queue for a while under real combined load (active sniping + exit scans
+// sharing one budget), and that's fine as long as it eventually resolves.
+// The bug this fixes: a 10s timeout was shorter than realistic queue wait
+// under load, so queued-but-fine calls got treated as failures — not the
+// RPC actually being slow. Bounding each scan's own footprint (see
+// exit/engine.js's maxPositionsPerScan) is the real fix for the demand
+// side; this is headroom on the timeout side for whatever's left over.
+const RPC_CALL_TIMEOUT_MS = 20_000;
 function withTimeout(promise, label) {
   return Promise.race([
     promise,

@@ -1,6 +1,7 @@
 import { config } from "../config.js";
-import { getPaperPortfolioReport, executeManualTrade } from "../execution/trade.js";
+import { valuePosition, executeManualTrade } from "../execution/trade.js";
 import { getPortfolioSnapshot } from "../paper/portfolio.js";
+import { getKeypair } from "../wallet/keypair.js";
 import { SOL_MINT } from "../execution/jupiter.js";
 
 /**
@@ -28,11 +29,25 @@ export const exitConfig = {
   maxHoldSeconds: Number(process.env.EXIT_MAX_HOLD_SECONDS ?? 300),
   checkIntervalSeconds: Number(process.env.EXIT_CHECK_INTERVAL_SECONDS ?? 15),
   sellSlippageBps: Number(process.env.EXIT_SLIPPAGE_BPS ?? 500),
+  // Caps this engine's own RPC footprint to a small constant per scan,
+  // REGARDLESS of how many positions the portfolio has grown to. Without
+  // this, every position sniping adds also adds to what every single exit
+  // scan has to check — unbounded growth against a fixed RPC budget. This
+  // was confirmed as the actual cause of a 100%-"no route" /portfolio
+  // report: 23 positions all valued at once, competing with active
+  // sniping for the same rate-limited connection, queued long enough to
+  // exceed the per-call timeout before ever reaching the network — not a
+  // real RPC failure, a self-inflicted one from unbounded demand. Positions
+  // are checked in rotation, a bounded number per scan, so every position
+  // still gets evaluated regularly even as the portfolio grows — it just
+  // takes more scan cycles to cycle through all of them.
+  maxPositionsPerScan: Number(process.env.EXIT_MAX_POSITIONS_PER_SCAN ?? 6),
 };
 
 let enabled = false;
 let intervalHandle = null;
 let scanning = false; // prevents overlapping scans if one run takes longer than the interval
+let rotationCursor = 0; // where the next scan resumes in the position list
 
 function decideExit(position, openedAt) {
   if (position.unrealizedPnlLamports === null) return null; // no route this cycle — try again next scan
@@ -54,16 +69,38 @@ function decideExit(position, openedAt) {
   return null;
 }
 
+/** Picks up to maxPositionsPerScan entries starting at the rotation cursor, wrapping around. */
+function pickNextBatch(mints) {
+  if (mints.length === 0) return [];
+  if (rotationCursor >= mints.length) rotationCursor = 0;
+
+  const batch = [];
+  let i = rotationCursor;
+  for (let count = 0; count < Math.min(exitConfig.maxPositionsPerScan, mints.length); count++) {
+    batch.push(mints[i]);
+    i = (i + 1) % mints.length;
+  }
+  rotationCursor = i;
+  return batch;
+}
+
 async function scanOnce(onEvent) {
-  if (scanning) return; // last scan still running (e.g. many positions, or a slow RPC) — skip, don't stack up
+  if (scanning) return; // last scan still running — skip, don't stack up
   scanning = true;
   try {
     if (!config.paperTrading) return; // see REAL-MODE GAP above
 
-    const report = await getPaperPortfolioReport();
-    const snap = getPortfolioSnapshot(); // for openedAt, not included in the report itself
+    const snap = getPortfolioSnapshot();
+    const openMints = Object.keys(snap.holdings).filter((m) => snap.holdings[m].amount !== "0");
+    const batch = pickNextBatch(openMints);
+    if (batch.length === 0) return;
 
-    for (const position of report.positions) {
+    const userPubkey = getKeypair().publicKey;
+    const valued = await Promise.all(
+      batch.map((mint) => valuePosition(mint, snap.holdings[mint], userPubkey))
+    );
+
+    for (const position of valued) {
       const openedAt = snap.holdings[position.mint]?.openedAt ?? null;
       const exit = decideExit(position, openedAt);
       if (!exit) continue;
@@ -90,6 +127,7 @@ async function scanOnce(onEvent) {
 export function startExitEngine(onEvent) {
   if (enabled) return;
   enabled = true;
+  rotationCursor = 0;
   intervalHandle = setInterval(() => scanOnce(onEvent), exitConfig.checkIntervalSeconds * 1000);
   scanOnce(onEvent); // don't wait a full interval for the first check
 }
